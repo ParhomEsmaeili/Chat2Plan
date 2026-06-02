@@ -79,3 +79,79 @@ class SpecDelta:
 
     def to_dict(self):
         return asdict(self)
+
+
+class TaskStatus(str, Enum):
+    """Status of a processing task."""
+    QUEUED = "queued"
+    UPLOADING = "uploading"
+    TRANSCRIBING = "transcribing"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+@dataclass
+class ProcessingTask:
+    """Tracks progress of a single audio file through the pipeline."""
+    task_id: str
+    filename: str
+    source: str  # "phone", "laptop", "api"
+    status: TaskStatus = TaskStatus.QUEUED
+    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    started_at: str = ""
+    completed_at: str = ""
+    
+    # Progress tracking
+    file_size_bytes: int = 0
+    duration_seconds: float = 0.0
+    error_message: str = ""
+    
+    # Outputs
+    transcript_text: str = ""
+    transcript_length: int = 0  # character count
+    spec_updated: bool = False
+    
+    # Metadata
+    mode: str = "creative"
+    backend_used: str = ""  # "claude" or "dgx"
+
+    def to_dict(self):
+        return {
+            "task_id": self.task_id,
+            "filename": self.filename,
+            "source": self.source,
+            "status": self.status.value,
+            "created_at": self.created_at,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "file_size_bytes": self.file_size_bytes,
+            "duration_seconds": self.duration_seconds,
+            "error_message": self.error_message,
+            "transcript_text": self.transcript_text,
+            "transcript_length": self.transcript_length,
+            "spec_updated": self.spec_updated,
+            "mode": self.mode,
+            "backend_used": self.backend_used,
+        }
+
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> "ProcessingTask":
+        task = ProcessingTask(
+            task_id=data["task_id"],
+            filename=data["filename"],
+            source=data["source"],
+            status=TaskStatus(data.get("status", "queued")),
+            created_at=data.get("created_at", datetime.now().isoformat()),
+            started_at=data.get("started_at", ""),
+            completed_at=data.get("completed_at", ""),
+            file_size_bytes=data.get("file_size_bytes", 0),
+            duration_seconds=data.get("duration_seconds", 0.0),
+            error_message=data.get("error_message", ""),
+            transcript_text=data.get("transcript_text", ""),
+            transcript_length=data.get("transcript_length", 0),
+            spec_updated=data.get("spec_updated", False),
+            mode=data.get("mode", "creative"),
+            backend_used=data.get("backend_used", ""),
+        )
+        return task

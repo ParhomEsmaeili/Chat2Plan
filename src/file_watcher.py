@@ -8,17 +8,19 @@ from watchdog.events import FileSystemEventHandler
 from src.state_manager import StateManager
 from src.semantic_engine import SemanticEngine
 from src.transcription_service import TranscriptionService
-from src.models import Mode
+from src.progress_manager import ProgressManager
+from src.models import Mode, TaskStatus
 
 
 class RecordingHandler(FileSystemEventHandler):
     """Handle new audio files in the recordings folder."""
 
-    def __init__(self, state_manager, semantic_engine, transcription_service):
+    def __init__(self, state_manager, semantic_engine, transcription_service, progress_manager):
         """Initialize with service instances."""
         self.state_manager = state_manager
         self.semantic_engine = semantic_engine
         self.transcription_service = transcription_service
+        self.progress_manager = progress_manager
         self.processed_files = set()
 
     def on_created(self, event):
@@ -34,27 +36,60 @@ class RecordingHandler(FileSystemEventHandler):
         if event.src_path in self.processed_files:
             return
         
-        print(f"New audio file detected: {event.src_path}")
+        filename = Path(event.src_path).name
+        print(f"[FileWatcher] New audio file detected: {filename}")
+        
+        # Determine source (phone or laptop based on context - default to phone)
+        source = "phone"
+        
+        # Create progress task
+        try:
+            file_size = os.path.getsize(event.src_path)
+        except:
+            file_size = 0
+        
+        task = self.progress_manager.create_task(
+            filename=filename,
+            source=source,
+            file_size_bytes=file_size,
+            mode="creative",
+        )
         
         # Wait a bit for file to finish writing
         time.sleep(1)
         
         try:
+            # Update task: transcribing
+            self.progress_manager.update_task_status(task.task_id, TaskStatus.TRANSCRIBING)
+            
             # Transcribe
-            print(f"Transcribing {Path(event.src_path).name}...")
+            print(f"[FileWatcher] Transcribing {filename}...")
             text = self.transcription_service.transcribe(event.src_path)
             
             if not text:
-                print(f"Transcription failed for {event.src_path}")
+                print(f"[FileWatcher] Transcription failed for {filename}")
+                self.progress_manager.update_task_status(
+                    task.task_id,
+                    TaskStatus.FAILED,
+                    error_message="Transcription returned empty result",
+                )
                 return
             
-            print(f"Transcription complete: {len(text)} characters")
+            print(f"[FileWatcher] Transcription complete: {len(text)} characters")
             
             # Add to transcript buffer
-            self.state_manager.append_transcript(text, source="phone")
+            self.state_manager.append_transcript(text, source=source)
+            
+            # Update task: processing
+            self.progress_manager.update_task_status(
+                task.task_id,
+                TaskStatus.PROCESSING,
+                transcript_text=text,
+                transcript_length=len(text),
+            )
             
             # Auto-process in Creative mode
-            print("Processing in CREATIVE mode...")
+            print(f"[FileWatcher] Processing in CREATIVE mode...")
             mode = "creative"  # Always start in creative mode for brainstorms
             current_spec = self.state_manager.load_spec()
             transcript_history = self.state_manager.get_transcript_history()
@@ -72,19 +107,32 @@ class RecordingHandler(FileSystemEventHandler):
             state.current_spec_markdown = updated_spec
             self.state_manager.save_state(state)
             
-            print(f"Spec updated (backend: {backend})")
+            # Update task: completed
+            self.progress_manager.update_task_status(
+                task.task_id,
+                TaskStatus.COMPLETED,
+                spec_updated=True,
+                backend_used=backend,
+            )
+            
+            print(f"[FileWatcher] Spec updated (backend: {backend})")
             
             # Mark as processed
             self.processed_files.add(event.src_path)
         
         except Exception as e:
-            print(f"Error processing {event.src_path}: {e}")
+            print(f"[FileWatcher] Error processing {filename}: {e}")
+            self.progress_manager.update_task_status(
+                task.task_id,
+                TaskStatus.FAILED,
+                error_message=str(e),
+            )
 
 
 class FileWatcher:
     """Watch OneDrive recordings folder for new audio files."""
 
-    def __init__(self, watch_path: str, state_manager, semantic_engine, transcription_service):
+    def __init__(self, watch_path: str, state_manager, semantic_engine, transcription_service, progress_manager):
         """
         Initialize file watcher.
         
@@ -93,10 +141,11 @@ class FileWatcher:
             state_manager: StateManager instance
             semantic_engine: SemanticEngine instance
             transcription_service: TranscriptionService instance
+            progress_manager: ProgressManager instance
         """
         self.watch_path = Path(watch_path)
         self.observer = Observer()
-        self.handler = RecordingHandler(state_manager, semantic_engine, transcription_service)
+        self.handler = RecordingHandler(state_manager, semantic_engine, transcription_service, progress_manager)
 
     def start(self):
         """Start watching the folder."""
@@ -118,6 +167,7 @@ class FileWatcher:
 def run_file_watcher():
     """Run file watcher (for daemon mode on DGX)."""
     import os
+    import time
     from dotenv import load_dotenv
     
     load_dotenv()
@@ -145,9 +195,13 @@ def run_file_watcher():
         timeout=int(os.getenv("DGX_TIMEOUT", "30")),
     )
     
+    progress_manager = ProgressManager(
+        progress_dir=os.getenv("STATE_DIR", "./state"),
+    )
+    
     # Start watcher
     watch_path = os.getenv("ONEDRIVE_RECORDINGS_PATH", "./recordings")
-    watcher = FileWatcher(watch_path, state_manager, semantic_engine, transcription_service)
+    watcher = FileWatcher(watch_path, state_manager, semantic_engine, transcription_service, progress_manager)
     watcher.start()
     
     print("File watcher running. Press Ctrl+C to stop.")
